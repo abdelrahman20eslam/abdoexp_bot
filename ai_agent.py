@@ -38,17 +38,28 @@ async def analyze_message(text: str) -> dict:
     today = date.today().strftime("%Y-%m-%d")
     prompt = f"{SYSTEM_PROMPT}\n\nتاريخ اليوم: {today}\n\nرسالة المستخدم: {text}"
 
+    import logging
+logger = logging.getLogger(__name__)
+
+async def analyze_message(text: str) -> dict:
+    today = date.today().strftime("%Y-%m-%d")
+    prompt = f"{SYSTEM_PROMPT}\n\nتاريخ اليوم: {today}\n\nرسالة المستخدم: {text}"
+
     try:
         response = model.generate_content(prompt)
         raw = response.text.strip()
 
-        # تنظيف الرد من أي markdown
-        raw = re.sub(r"```json|```", "", raw).strip()
+        logger.info(f"Gemini raw response: {raw}")
 
+        raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
         return result
 
-    except json.JSONDecodeError:
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        logger.error(f"Raw Gemini response was: {raw if 'raw' in locals() else 'NO RESPONSE'}")
         return {"type": "unknown"}
+
     except Exception as e:
+        logger.error(f"Gemini exception: {e}")
         return {"type": "unknown"}
