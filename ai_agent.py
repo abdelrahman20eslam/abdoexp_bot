@@ -1,12 +1,19 @@
 import os
 import json
 import re
+import logging
 from datetime import date
 import google.generativeai as genai
 
+logger = logging.getLogger(__name__)
+
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
-genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash")
+
+if GEMINI_API_KEY:
+    genai.configure(api_key=GEMINI_API_KEY)
+    model = genai.GenerativeModel("gemini-1.5-flash")
+else:
+    model = None
 
 SYSTEM_PROMPT = """أنت مساعد ذكي لتسجيل المصاريف الشخصية.
 
@@ -27,39 +34,65 @@ SYSTEM_PROMPT = """أنت مساعد ذكي لتسجيل المصاريف الش
 النوع 3 - غير معروف:
 إذا لم تفهم الرسالة.
 
-رد فقط بـ JSON صحيح بدون أي نص إضافي، مثال:
-{"type": "expense", "amount": 150, "category": "أكل", "description": "غداء", "date": "2024-01-15"}
-{"type": "report", "period": "month", "period_label": "الشهر"}
-{"type": "unknown"}
+رد فقط بـ JSON صحيح بدون أي نص إضافي.
 """
 
+def fallback_parse(text: str, today: str) -> dict:
+    text = text.strip()
+
+    report_map = {
+        "تقرير النهارده": ("day", "النهارده"),
+        "تقرير اليوم": ("day", "النهارده"),
+        "تقرير الأسبوع": ("week", "الأسبوع"),
+        "تقرير الاسبوع": ("week", "الأسبوع"),
+        "تقرير الشهر": ("month", "الشهر"),
+    }
+
+    if text in report_map:
+        period, label = report_map[text]
+        return {"type": "report", "period": period, "period_label": label}
+
+    categories = ["أكل", "مواصلات", "تسوق", "فواتير", "ترفيه", "صحة", "تعليم"]
+    amount_match = re.search(r'(\d+)', text)
+
+    if amount_match:
+        amount = int(amount_match.group(1))
+        category = "أخرى"
+        for cat in categories:
+            if cat in text:
+                category = cat
+                break
+
+        if any(word in text for word in ["صرفت", "دفعت", "اشتريت", "حساب", "كلفني"]):
+            return {
+                "type": "expense",
+                "amount": amount,
+                "category": category,
+                "description": text,
+                "date": today
+            }
+
+    return {"type": "unknown"}
+
 
 async def analyze_message(text: str) -> dict:
     today = date.today().strftime("%Y-%m-%d")
-    prompt = f"{SYSTEM_PROMPT}\n\nتاريخ اليوم: {today}\n\nرسالة المستخدم: {text}"
 
-    import logging
-logger = logging.getLogger(__name__)
+    if not model:
+        logger.error("GEMINI_API_KEY is missing")
+        return fallback_parse(text, today)
 
-async def analyze_message(text: str) -> dict:
-    today = date.today().strftime("%Y-%m-%d")
     prompt = f"{SYSTEM_PROMPT}\n\nتاريخ اليوم: {today}\n\nرسالة المستخدم: {text}"
 
     try:
         response = model.generate_content(prompt)
         raw = response.text.strip()
-
         logger.info(f"Gemini raw response: {raw}")
 
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
         return result
 
-    except json.JSONDecodeError as e:
-        logger.error(f"JSON decode error: {e}")
-        logger.error(f"Raw Gemini response was: {raw if 'raw' in locals() else 'NO RESPONSE'}")
-        return {"type": "unknown"}
-
     except Exception as e:
-        logger.error(f"Gemini exception: {e}")
-        return {"type": "unknown"}
+        logger.error(f"Gemini failed: {e}")
+        return fallback_parse(text, today)
