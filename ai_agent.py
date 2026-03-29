@@ -40,13 +40,53 @@ SYSTEM_PROMPT = """أنت مساعد ذكي لتسجيل المصاريف الش
 إذا لم تفهم الرسالة.
 
 رد فقط بـ JSON صحيح بدون أي نص إضافي.
+استخدم القيم التالية فقط في type:
+- expense
+- report
+- unknown
+ولا تستخدم أي ترجمة عربية في type.
 """
 
 CATEGORIES = ["أكل", "مواصلات", "تسوق", "فواتير", "ترفيه", "صحة", "تعليم"]
 
 
+def normalize_text(text: str) -> str:
+    text = (text or "").strip()
+    text = re.sub(r"\s+", " ", text)
+    return text
+
+
+def normalize_type(value: str) -> str:
+    if not value:
+        return "unknown"
+
+    value = str(value).strip().lower()
+
+    type_map = {
+        "expense": "expense",
+        "report": "report",
+        "unknown": "unknown",
+        "تسجيل مصروف": "expense",
+        "مصروف": "expense",
+        "expense تسجيل": "expense",
+        "تقرير": "report",
+        "طلب تقرير": "report",
+        "غير معروف": "unknown",
+        "unknown type": "unknown",
+    }
+
+    return type_map.get(value, "unknown")
+
+
+def extract_category(text: str) -> str:
+    for cat in CATEGORIES:
+        if cat in text:
+            return cat
+    return "أخرى"
+
+
 def fallback_parse(text: str, today: str) -> dict:
-    text = text.strip()
+    text = normalize_text(text)
 
     report_map = {
         "تقرير النهارده": ("day", "النهارده"),
@@ -54,33 +94,35 @@ def fallback_parse(text: str, today: str) -> dict:
         "تقرير الاسبوع": ("week", "الأسبوع"),
         "تقرير الأسبوع": ("week", "الأسبوع"),
         "تقرير الشهر": ("month", "الشهر"),
+        "النهارده تقرير": ("day", "النهارده"),
+        "الاسبوع تقرير": ("week", "الأسبوع"),
+        "الأسبوع تقرير": ("week", "الأسبوع"),
+        "الشهر تقرير": ("month", "الشهر"),
     }
 
-    normalized = re.sub(r"\s+", " ", text).strip()
-
-    if normalized in report_map:
-        period, label = report_map[normalized]
+    if text in report_map:
+        period, label = report_map[text]
         return {"type": "report", "period": period, "period_label": label}
 
-    amount_match = re.search(r'(\d+(?:\.\d+)?)', normalized)
+    amount_match = re.search(r'(\d+(?:\.\d+)?)', text)
     if amount_match:
         amount = float(amount_match.group(1))
-        category = "أخرى"
+        category = extract_category(text)
 
-        for cat in CATEGORIES:
-            if cat in normalized:
-                category = cat
-                break
+        expense_keywords = [
+            "صرفت", "دفعت", "اشتريت", "كلفني", "حساب", "مصروف", "دفعه", "دفعتهم"
+        ]
 
-        expense_keywords = ["صرفت", "دفعت", "اشتريت", "حساب", "كلفني", "دفعه", "مصروف"]
-        if any(word in normalized for word in expense_keywords):
-            description = normalized
+        if any(word in text for word in expense_keywords):
+            description = text
             for word in expense_keywords:
-                description = description.replace(word, "").strip()
-            description = re.sub(r'\b\d+(?:\.\d+)?\b', '', description).strip()
-            description = description.replace("جنيه", "").strip()
+                description = description.replace(word, " ")
+            description = re.sub(r'\b\d+(?:\.\d+)?\b', ' ', description)
+            description = description.replace("جنيه", " ")
+            description = re.sub(r"\s+", " ", description).strip()
+
             if not description:
-                description = "مصروف"
+                description = category if category != "أخرى" else "مصروف"
 
             return {
                 "type": "expense",
@@ -95,7 +137,7 @@ def fallback_parse(text: str, today: str) -> dict:
 
 async def analyze_message(text: str) -> dict:
     today = date.today().strftime("%Y-%m-%d")
-    text = (text or "").strip()
+    text = normalize_text(text)
 
     if not text:
         return {"type": "unknown"}
@@ -114,14 +156,17 @@ async def analyze_message(text: str) -> dict:
         raw = re.sub(r"```json|```", "", raw).strip()
         result = json.loads(raw)
 
-        if not isinstance(result, dict) or "type" not in result:
-            logger.error(f"Invalid Gemini JSON structure: {result}")
+        if not isinstance(result, dict):
+            logger.error(f"Gemini returned non-dict JSON: {result}")
             return fallback_parse(text, today)
 
-        if result["type"] == "expense":
+        result_type = normalize_type(result.get("type"))
+        result["type"] = result_type
+
+        if result_type == "expense":
             amount = result.get("amount")
             category = result.get("category", "أخرى")
-            description = result.get("description", "مصروف")
+            description = result.get("description", "")
             msg_date = result.get("date", today)
 
             try:
@@ -131,18 +176,21 @@ async def analyze_message(text: str) -> dict:
                 return fallback_parse(text, today)
 
             if category not in CATEGORIES:
-                category = "أخرى"
+                category = extract_category(text)
+
+            if not description or not str(description).strip():
+                description = category if category != "أخرى" else "مصروف"
 
             return {
                 "type": "expense",
                 "amount": amount,
                 "category": category,
-                "description": description,
-                "date": msg_date
+                "description": str(description).strip(),
+                "date": msg_date or today
             }
 
-        if result["type"] == "report":
-            period = result.get("period")
+        if result_type == "report":
+            period = str(result.get("period", "")).strip().lower()
             period_label = result.get("period_label")
 
             if period not in ["day", "week", "month"]:
@@ -162,7 +210,7 @@ async def analyze_message(text: str) -> dict:
                 "period_label": period_label
             }
 
-        return {"type": "unknown"}
+        return fallback_parse(text, today)
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {e}")
