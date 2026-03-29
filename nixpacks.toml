@@ -1,2 +1,2 @@
-[phases.install]
-cmds = ["pip install python-telegram-bot==21.3 google-generativeai==0.8.3"]
+[variables]
+PYTHON_VERSION = "3.11"
